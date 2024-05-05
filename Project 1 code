@@ -1,1 +1,132 @@
+import csv
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import string
+from tqdm import tqdm
+!pip install emoji
+import emoji
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f'Using device: {device}')
+
+csv_filename = 'cleaned_review.csv'
+
+category_lines = {}
+
+# Function to remove emojis from text using the emoji library
+def remove_emojis(text):
+    return emoji.replace_emoji(text, replace='')
+
+# Open the CSV file for reading
+with open(csv_filename, 'r', encoding='utf-8') as csvfile:
+    reader = csv.reader(csvfile)
+    next(reader)  # Skip the header row
+    for row in reader:
+        name, category = row
+        cleaned_name = remove_emojis(name)
+        if cleaned_name:
+            if category in category_lines:
+                category_lines[category].append(cleaned_name)
+            else:
+                category_lines[category] = [cleaned_name]
+
+# get the number of unique characters and the number of catorgies.
+all_letters = string.ascii_letters + " .,;'"
+n_letters = len(all_letters)
+all_categories = tuple(category_lines.keys())
+n_categories = len(all_categories)
+
+# change the reviews into tensor
+def lineToTensor(line):
+    tensor = torch.zeros(len(line), 1, n_letters, device=device)
+    for li, letter in enumerate(line):
+        letter_index = all_letters.find(letter)
+        if letter_index != -1:
+            tensor[li][0][letter_index] = 1
+    return tensor
+
+# change the catorgores to tensor
+def categoryToTensor(category):
+    li = all_categories.index(category)
+    return torch.tensor([li], device=device, dtype=torch.long)
+
+# Create our recurrent neural network
+class NameOriginRNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(NameOriginRNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.rnn = nn.RNN(input_size, hidden_size)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, input):
+        hidden = torch.zeros(1, input.size(1), self.hidden_size, device=device)
+        output, hidden = self.rnn(input, hidden)
+        output = self.fc(output[-1])
+        return output
+
+rnn = NameOriginRNN(n_letters, 128, n_categories).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(rnn.parameters(), lr=0.005)
+
+# Training the model
+for epoch in range(10):
+    total_loss = 0
+    progress_bar = tqdm(category_lines.items(), desc=f'Epoch {epoch+1}')
+    for category, names in progress_bar:
+        for name in names:
+            line_tensor = lineToTensor(name)
+            category_tensor = categoryToTensor(category)
+            optimizer.zero_grad()
+            output = rnn(line_tensor)
+            loss = criterion(output, category_tensor)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        progress_bar.set_postfix({'Loss': total_loss})
+    print(f'Total loss for epoch {epoch + 1}: {total_loss}')
+
+# Predict function
+def predict(model, name):
+    if not name:
+        return None
+    name_tensor = lineToTensor(name)
+    if name_tensor.size(0) == 0:
+        return None
+    model.eval()
+    with torch.no_grad():
+        output = model(name_tensor)
+        topv, topi = output.topk(1)
+        category_index = topi[0].item()
+    return all_categories[category_index]
+
+# Evaluation
+true_labels, predicted_labels = [], []
+for category, names in category_lines.items():
+    for name in names:
+        predicted_category = predict(rnn, name)
+        true_labels.append(category)
+        predicted_labels.append(predicted_category)
+
+label_encoder = LabelEncoder()
+true_labels_encoded = label_encoder.fit_transform(true_labels)
+predicted_labels_encoded = label_encoder.transform(predicted_labels)
+
+# Confusion matrix
+cm = confusion_matrix(true_labels_encoded, predicted_labels_encoded)
+class_names = label_encoder.classes_
+
+# Plot confusion matrix
+def plot_confusion_matrix(cm, class_names):
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.title('Confusion Matrix')
+    plt.show()
+
+plot_confusion_matrix(cm, class_names)
